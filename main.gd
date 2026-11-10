@@ -30,10 +30,38 @@ var env: Environment
 var sun: DirectionalLight3D
 var chunks := {}
 var taken := {}
+var felled := {}
+var hits := {}
+var res_list := {}
+var camps := {}
+var fires: Array = []
 var pending: Array = []
 var last_chunk := Vector2i(99999, 99999)
 var biome_name := ""
 var time_name := ""
+
+var inv := {}
+var ITEMS := {
+	"wood": ["Gỗ", Color(0.55, 0.35, 0.18)],
+	"stone": ["Đá", Color(0.6, 0.6, 0.62)],
+	"fiber": ["Sợi", Color(0.6, 0.75, 0.25)],
+	"berry": ["Quả", Color(0.85, 0.1, 0.25)],
+	"roast": ["Quả nướng", Color(0.75, 0.4, 0.15)],
+	"bandage": ["Băng gạc", Color(0.9, 0.9, 0.9)],
+	"axe": ["Rìu đá", Color(0.45, 0.5, 0.75)],
+	"pick": ["Cuốc đá", Color(0.4, 0.6, 0.7)],
+	"spear": ["Giáo gỗ", Color(0.7, 0.55, 0.3)],
+	"fire": ["Lửa trại", Color(1.0, 0.5, 0.1)],
+}
+var RECIPES := [
+	{"id": "axe", "name": "Rìu đá", "need": {"wood": 3, "stone": 2, "fiber": 1}, "fire": false},
+	{"id": "pick", "name": "Cuốc đá", "need": {"wood": 3, "stone": 3, "fiber": 1}, "fire": false},
+	{"id": "spear", "name": "Giáo gỗ", "need": {"wood": 2, "stone": 1}, "fire": false},
+	{"id": "fire", "name": "Lửa trại", "need": {"wood": 5, "stone": 3}, "fire": false},
+	{"id": "roast", "name": "Quả nướng", "need": {"berry": 2}, "fire": true},
+	{"id": "bandage", "name": "Băng gạc", "need": {"fiber": 3}, "fire": false},
+]
+var act_cd := 0.0
 
 var player: Node3D
 var pivot: Node3D
@@ -70,6 +98,11 @@ var joy_knob: Panel
 var btn_run: Panel
 var btn_pick: Panel
 var btn_drink: Panel
+var btn_bag: Panel
+var panel: PanelContainer
+var grid: GridContainer
+var rec_box: VBoxContainer
+var status: Label
 var bars := {}
 
 func _mk_noise(seed_: int, freq: float, oct: int) -> FastNoiseLite:
@@ -153,6 +186,7 @@ func _ready() -> void:
 	cam.far = 400.0
 	pivot.add_child(cam)
 
+	_load_inv()
 	_build_ui()
 	_update_sky()
 
@@ -208,17 +242,21 @@ func _build_ui() -> void:
 	ab.anchor_bottom = 1.0
 	ab.offset_left = -220
 	ab.offset_right = -20
-	ab.offset_top = -330
+	ab.offset_top = -350
 	ab.offset_bottom = -20
-	ab.add_theme_constant_override("separation", 20)
+	ab.add_theme_constant_override("separation", 16)
 	ab.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(ab)
-	btn_pick = _btn("Hái quả")
+	btn_bag = _btn("Túi đồ")
+	btn_pick = _btn("Thu thập")
 	btn_drink = _btn("Uống nước")
 	btn_run = _btn("Chạy")
+	ab.add_child(btn_bag)
 	ab.add_child(btn_pick)
 	ab.add_child(btn_drink)
 	ab.add_child(btn_run)
+
+	_build_bag(ui)
 
 	menu = VBoxContainer.new()
 	menu.anchor_left = 0.5
@@ -274,16 +312,288 @@ func _btn(t: String) -> Panel:
 	sb.bg_color = Color(0, 0, 0, 0.45)
 	sb.set_corner_radius_all(20)
 	p.add_theme_stylebox_override("panel", sb)
-	p.custom_minimum_size = Vector2(200, 90)
+	p.custom_minimum_size = Vector2(200, 70)
 	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var l := Label.new()
 	l.text = t
-	l.add_theme_font_size_override("font_size", 30)
+	l.add_theme_font_size_override("font_size", 26)
 	l.set_anchors_preset(Control.PRESET_FULL_RECT)
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	p.add_child(l)
 	return p
+
+# ---------- TÚI ĐỒ & CHẾ TẠO ----------
+func _flat(c: Color, r: int = 14) -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = c
+	sb.set_corner_radius_all(r)
+	return sb
+
+func _style_btn(b: Button, c: Color) -> void:
+	b.add_theme_stylebox_override("normal", _flat(c))
+	b.add_theme_stylebox_override("hover", _flat(c.lightened(0.15)))
+	b.add_theme_stylebox_override("pressed", _flat(c.lightened(0.3)))
+	b.add_theme_stylebox_override("disabled", _flat(Color(0.2, 0.2, 0.22)))
+	b.add_theme_font_size_override("font_size", 24)
+
+func _build_bag(ui: CanvasLayer) -> void:
+	panel = PanelContainer.new()
+	panel.anchor_left = 0.5
+	panel.anchor_right = 0.5
+	panel.anchor_top = 0.5
+	panel.anchor_bottom = 0.5
+	panel.offset_left = -540
+	panel.offset_right = 540
+	panel.offset_top = -310
+	panel.offset_bottom = 310
+	var ps := _flat(Color(0.05, 0.07, 0.1, 0.94), 24)
+	ps.set_content_margin_all(18)
+	panel.add_theme_stylebox_override("panel", ps)
+	panel.visible = false
+	ui.add_child(panel)
+
+	var root := VBoxContainer.new()
+	root.add_theme_constant_override("separation", 12)
+	panel.add_child(root)
+	var head := HBoxContainer.new()
+	root.add_child(head)
+	var title := Label.new()
+	title.text = "TÚI ĐỒ & CHẾ TẠO"
+	title.add_theme_font_size_override("font_size", 32)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(title)
+	var close := Button.new()
+	close.text = "Đóng"
+	close.custom_minimum_size = Vector2(130, 64)
+	close.add_theme_font_size_override("font_size", 26)
+	close.pressed.connect(_toggle_bag)
+	head.add_child(close)
+
+	var body := HBoxContainer.new()
+	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_theme_constant_override("separation", 24)
+	root.add_child(body)
+	body.add_child(_column("Túi đồ (chạm để dùng)", true))
+	body.add_child(_column("Chế tạo", false))
+
+	status = Label.new()
+	status.add_theme_font_size_override("font_size", 24)
+	root.add_child(status)
+
+func _column(t: String, is_grid: bool) -> VBoxContainer:
+	var col := VBoxContainer.new()
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var l := Label.new()
+	l.text = t
+	l.add_theme_font_size_override("font_size", 26)
+	col.add_child(l)
+	var sc := ScrollContainer.new()
+	sc.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	sc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	col.add_child(sc)
+	if is_grid:
+		grid = GridContainer.new()
+		grid.columns = 3
+		grid.add_theme_constant_override("h_separation", 10)
+		grid.add_theme_constant_override("v_separation", 10)
+		grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		sc.add_child(grid)
+	else:
+		rec_box = VBoxContainer.new()
+		rec_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		rec_box.add_theme_constant_override("separation", 10)
+		sc.add_child(rec_box)
+	return col
+
+func _toggle_bag() -> void:
+	panel.visible = not panel.visible
+	if panel.visible:
+		joy_id = -1
+		look_id = -1
+		run_id = -1
+		running = false
+		move_vec = Vector2.ZERO
+		joy_base.visible = false
+		joy_knob.visible = false
+		status.text = ""
+		_refresh_bag()
+
+func _refresh_bag() -> void:
+	for ch in grid.get_children():
+		grid.remove_child(ch)
+		ch.queue_free()
+	for ch in rec_box.get_children():
+		rec_box.remove_child(ch)
+		ch.queue_free()
+
+	var any := false
+	for id in ITEMS.keys():
+		var cnt := int(inv.get(id, 0))
+		if cnt <= 0:
+			continue
+		any = true
+		var b := Button.new()
+		b.text = "%s\nx%d" % [ITEMS[id][0], cnt]
+		b.custom_minimum_size = Vector2(150, 100)
+		var ic: Color = ITEMS[id][1]
+		_style_btn(b, ic.darkened(0.35))
+		b.pressed.connect(_use.bind(id))
+		grid.add_child(b)
+	if not any:
+		var l := Label.new()
+		l.text = "Túi trống. Hãy thu thập tài nguyên!"
+		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		l.custom_minimum_size = Vector2(300, 0)
+		l.add_theme_font_size_override("font_size", 24)
+		grid.add_child(l)
+
+	var near := _near_fire()
+	for r in RECIPES:
+		var ok := true
+		var parts := PackedStringArray()
+		for k in r["need"].keys():
+			var have := int(inv.get(k, 0))
+			var need := int(r["need"][k])
+			if have < need:
+				ok = false
+			parts.append("%s %d/%d" % [ITEMS[k][0], have, need])
+		var txt := "%s\n%s" % [r["name"], ", ".join(parts)]
+		if r["fire"]:
+			txt += "\n(cần đứng gần lửa trại)"
+			if not near:
+				ok = false
+		var rb := Button.new()
+		rb.text = txt
+		rb.custom_minimum_size = Vector2(0, 110)
+		rb.disabled = not ok
+		_style_btn(rb, Color(0.15, 0.4, 0.2))
+		rb.pressed.connect(_craft.bind(r["id"]))
+		rec_box.add_child(rb)
+
+func _craft(id: String) -> void:
+	for r in RECIPES:
+		if r["id"] != id:
+			continue
+		for k in r["need"].keys():
+			if int(inv.get(k, 0)) < int(r["need"][k]):
+				_say("Thiếu nguyên liệu")
+				return
+		if r["fire"] and not _near_fire():
+			_say("Cần đứng gần lửa trại")
+			return
+		for k in r["need"].keys():
+			_spend(k, int(r["need"][k]))
+		_add(id, 1)
+		_say("Đã chế tạo: " + r["name"])
+		break
+	_refresh_bag()
+
+func _use(id: String) -> void:
+	if int(inv.get(id, 0)) <= 0:
+		return
+	match id:
+		"berry":
+			hunger = minf(100.0, hunger + 15.0)
+			_spend(id, 1)
+			_say("Ăn quả (+15 no)")
+		"roast":
+			hunger = minf(100.0, hunger + 40.0)
+			hp = minf(100.0, hp + 5.0)
+			_spend(id, 1)
+			_say("Ăn quả nướng (+40 no)")
+		"bandage":
+			if hp >= 100.0:
+				_say("Máu đã đầy")
+				return
+			hp = minf(100.0, hp + 30.0)
+			_spend(id, 1)
+			_say("Đã băng bó (+30 máu)")
+		"fire":
+			_place_fire_here()
+			_spend(id, 1)
+			_say("Đã đặt lửa trại")
+		_:
+			_say("Cứ để trong túi, tự dùng khi thu thập")
+	_refresh_bag()
+
+func _add(id: String, n: int) -> void:
+	inv[id] = mini(99, int(inv.get(id, 0)) + n)
+	_save_inv()
+
+func _spend(id: String, n: int) -> void:
+	var left := int(inv.get(id, 0)) - n
+	if left <= 0:
+		inv.erase(id)
+	else:
+		inv[id] = left
+	_save_inv()
+
+func _has(id: String) -> bool:
+	return int(inv.get(id, 0)) > 0
+
+func _save_inv() -> void:
+	var f := FileAccess.open("user://inv.json", FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(inv))
+
+func _load_inv() -> void:
+	if not FileAccess.file_exists("user://inv.json"):
+		return
+	var f := FileAccess.open("user://inv.json", FileAccess.READ)
+	if f == null:
+		return
+	var data = JSON.parse_string(f.get_as_text())
+	if data is Dictionary:
+		for k in data.keys():
+			if ITEMS.has(k):
+				inv[k] = int(data[k])
+
+# ---------- LỬA TRẠI ----------
+func _near_fire() -> bool:
+	if player == null:
+		return false
+	var p := player.position
+	for f in fires:
+		if Vector2(f.x - p.x, f.z - p.z).length() < 7.0:
+			return true
+	for f in camps.values():
+		if Vector2(f.x - p.x, f.z - p.z).length() < 7.0:
+			return true
+	return false
+
+func _place_fire_here() -> void:
+	var fwd := Vector3(0, 0, -2.5).rotated(Vector3.UP, yaw)
+	var pos := player.position + fwd
+	pos.y = _height(pos.x, pos.z)
+	_spawn_fire(pos)
+	if multiplayer.has_multiplayer_peer():
+		_rpc_fire.rpc(pos)
+
+func _spawn_fire(pos: Vector3) -> void:
+	fires.append(pos)
+	var n := Node3D.new()
+	n.position = pos
+	var f := MeshInstance3D.new()
+	f.mesh = flame_mesh
+	f.material_override = flame_mat
+	n.add_child(f)
+	for i in 6:
+		var a := float(i) * TAU / 6.0
+		var st := MeshInstance3D.new()
+		st.mesh = rock_mesh
+		st.material_override = veg_mat
+		st.position = Vector3(cos(a) * 1.1, 0.0, sin(a) * 1.1)
+		st.scale = Vector3(0.3, 0.3, 0.3)
+		n.add_child(st)
+	var lamp := OmniLight3D.new()
+	lamp.light_color = Color(1.0, 0.6, 0.25)
+	lamp.light_energy = 2.5
+	lamp.omni_range = 18.0
+	lamp.position = Vector3(0, 1.8, 0)
+	n.add_child(lamp)
+	add_child(n)
 
 # ---------- MẠNG ----------
 func _wire() -> void:
@@ -340,6 +650,8 @@ func _on_peer(id: int) -> void:
 	_add_avatar(id)
 	if multiplayer.is_server():
 		_sync_taken.rpc_id(id, taken.keys())
+		_sync_felled.rpc_id(id, felled.keys())
+		_sync_fires.rpc_id(id, fires)
 
 func _on_peer_gone(id: int) -> void:
 	if others.has(id):
@@ -390,6 +702,30 @@ func _sync_taken(keys: Array) -> void:
 	for k in keys:
 		_remove_bush(str(k))
 
+@rpc("any_peer", "reliable")
+func _rpc_felled(key: String) -> void:
+	_felled_apply(key)
+
+@rpc("authority", "reliable")
+func _sync_felled(keys: Array) -> void:
+	var cs := {}
+	for k in keys:
+		var ks := str(k)
+		felled[ks] = true
+		var parts := ks.split("_")
+		cs[Vector2i(int(parts[1]), int(parts[2]))] = true
+	for c in cs.keys():
+		_rebuild(c)
+
+@rpc("any_peer", "reliable")
+func _rpc_fire(pos: Vector3) -> void:
+	_spawn_fire(pos)
+
+@rpc("authority", "reliable")
+func _sync_fires(list: Array) -> void:
+	for p in list:
+		_spawn_fire(p)
+
 # ---------- GAME ----------
 func _start(note: String) -> void:
 	net_note = note
@@ -411,6 +747,8 @@ func _spawn_pos() -> Vector3:
 func _say(t: String) -> void:
 	msg.text = t
 	msg_time = 3.0
+	if status != null:
+		status.text = t
 
 func _height(x: float, z: float) -> float:
 	var h := noise.get_noise_2d(x, z) * 10.0
@@ -449,7 +787,7 @@ func _biome_label(x: float, z: float, h: float) -> String:
 	return "Đồng cỏ"
 
 func _input(e: InputEvent) -> void:
-	if not started:
+	if not started or panel.visible:
 		return
 	var half := get_viewport().get_visible_rect().size.x / 2.0
 	if e is InputEventScreenTouch:
@@ -459,9 +797,11 @@ func _input(e: InputEvent) -> void:
 				run_id = t.index
 				running = true
 			elif btn_pick.get_global_rect().has_point(t.position):
-				_pick()
+				_gather()
 			elif btn_drink.get_global_rect().has_point(t.position):
 				_drink()
+			elif btn_bag.get_global_rect().has_point(t.position):
+				_toggle_bag()
 			elif t.position.x < half and joy_id == -1:
 				joy_id = t.index
 				joy_origin = t.position
@@ -491,19 +831,83 @@ func _input(e: InputEvent) -> void:
 			yaw -= d.relative.x * 0.005
 			pitch = clampf(pitch + d.relative.y * 0.005, -1.2, 0.3)
 
-func _pick() -> void:
+func _gather() -> void:
+	if act_cd > 0.0:
+		return
+	act_cd = 0.5
 	var p := player.position
 	for c in chunks.values():
 		for b in c.get_children():
 			if b.has_meta("key") and Vector2(b.position.x - p.x, b.position.z - p.z).length() < 3.0:
 				var key: String = b.get_meta("key")
 				_remove_bush(key)
-				hunger = minf(100.0, hunger + 25.0)
-				_say("Đã hái quả (+25 no)")
+				_add("berry", randi_range(1, 2))
+				_add("fiber", 1)
+				_say("Hái bụi quả (+Quả, +Sợi)")
 				if multiplayer.has_multiplayer_peer():
 					_take.rpc(key)
 				return
-	_say("Không có bụi quả đỏ gần đây")
+
+	var best: Dictionary = {}
+	var bd := 3.8
+	for lst in res_list.values():
+		for r in lst:
+			var rp: Vector3 = r["pos"]
+			var dd := Vector2(rp.x - p.x, rp.z - p.z).length()
+			if dd < bd and not felled.has(r["key"]):
+				bd = dd
+				best = r
+	if best.is_empty():
+		_say("Không có gì để thu thập ở gần")
+		return
+
+	var rkey: String = best["key"]
+	var kind: int = best["kind"]
+	var cnt := int(hits.get(rkey, 0)) + 1
+	var need := 1
+	if kind == 0:
+		need = 2 if _has("axe") else 4
+	elif kind == 1:
+		need = 1 if _has("pick") else 3
+	if cnt < need:
+		hits[rkey] = cnt
+		_say("%s (%d/%d)" % [_res_name(kind), cnt, need])
+		return
+	hits.erase(rkey)
+	if kind == 0:
+		var w := 4 if _has("axe") else 2
+		_add("wood", w)
+		_say("Chặt cây: +%d Gỗ" % w)
+	elif kind == 1:
+		var s := 3 if _has("pick") else 1
+		_add("stone", s)
+		_say("Đập đá: +%d Đá" % s)
+	else:
+		_add("fiber", 2)
+		hp = maxf(1.0, hp - 5.0)
+		_say("Gai xương rồng đâm! +2 Sợi, -5 máu")
+	_felled_apply(rkey)
+	if multiplayer.has_multiplayer_peer():
+		_rpc_felled.rpc(rkey)
+
+func _res_name(kind: int) -> String:
+	if kind == 0:
+		return "Chặt cây"
+	if kind == 1:
+		return "Đập đá"
+	return "Cắt xương rồng"
+
+func _felled_apply(key: String) -> void:
+	felled[key] = true
+	var parts := key.split("_")
+	_rebuild(Vector2i(int(parts[1]), int(parts[2])))
+
+func _rebuild(c: Vector2i) -> void:
+	if chunks.has(c):
+		chunks[c].queue_free()
+		var m := _make_chunk(c)
+		chunks[c] = m
+		add_child(m)
 
 func _drink() -> void:
 	if _height(player.position.x, player.position.z) < WATER_Y + 1.0:
@@ -556,6 +960,7 @@ func _update_sky() -> void:
 func _process(delta: float) -> void:
 	if not started:
 		return
+	act_cd = maxf(0.0, act_cd - delta)
 	var moving := move_vec.length() > 0.1
 	var sprint := running and moving and stamina > 0.0
 	var spd := RUN if sprint else WALK
@@ -604,6 +1009,8 @@ func _update_chunks() -> void:
 		if not need.has(k):
 			chunks[k].queue_free()
 			chunks.erase(k)
+			res_list.erase(k)
+			camps.erase(k)
 	pending.clear()
 	for k in need.keys():
 		if not chunks.has(k):
@@ -638,6 +1045,7 @@ func _vcolor(x: float, z: float, h: float, t: float) -> Color:
 	return Color(c.r * v, c.g * v, c.b * v)
 
 func _make_chunk(c: Vector2i) -> MeshInstance3D:
+	camps.erase(c)
 	var n := RES + 1
 	var step := CHUNK_SIZE / RES
 	var ox := c.x * CHUNK_SIZE
@@ -678,6 +1086,7 @@ func _make_chunk(c: Vector2i) -> MeshInstance3D:
 	var pines: Array = []
 	var cacti: Array = []
 	var rocks: Array = []
+	var lst: Array = []
 	for i in 70:
 		var x := ox + rng.randf() * CHUNK_SIZE
 		var z := oz + rng.randf() * CHUNK_SIZE
@@ -688,27 +1097,47 @@ func _make_chunk(c: Vector2i) -> MeshInstance3D:
 		var bid := _biome_id(h, tnoise.get_noise_2d(x, z))
 		if bid < 0:
 			continue
+		var rkey := "r_%d_%d_%d" % [c.x, c.y, i]
+		if felled.has(rkey):
+			continue
 		var pos := Vector3(x, h - 0.1, z)
 		var dens := clampf(0.4 + fnoise.get_noise_2d(x, z) * 1.2, 0.05, 0.85)
+		var which := ""
 		match bid:
 			0:
 				if roll < dens:
-					oaks.append(_xf(pos, ang, s, s))
+					which = "oak"
 				elif roll > 0.97:
-					rocks.append(_xf(pos, ang, s * 0.8, s * 0.7))
+					which = "rock"
 			1:
 				if roll < 0.2:
-					cacti.append(_xf(pos, ang, s, s))
+					which = "cactus"
 				elif roll > 0.9:
-					rocks.append(_xf(pos, ang, s, s * 0.8))
+					which = "rock"
 			2:
 				if roll < dens * 0.8:
-					pines.append(_xf(pos, ang, s, s))
+					which = "pine"
 				elif roll > 0.95:
-					rocks.append(_xf(pos, ang, s, s * 0.8))
+					which = "rock"
 			3:
 				if roll < 0.25:
-					rocks.append(_xf(pos, ang, s * 1.6, s * 1.3))
+					which = "rock"
+		if which == "":
+			continue
+		var kind := 0
+		if which == "oak":
+			oaks.append(_xf(pos, ang, s, s))
+		elif which == "pine":
+			pines.append(_xf(pos, ang, s, s))
+		elif which == "cactus":
+			cacti.append(_xf(pos, ang, s, s))
+			kind = 2
+		else:
+			var sr := s * (1.6 if bid == 3 else 0.9)
+			rocks.append(_xf(pos, ang, sr, sr * 0.85))
+			kind = 1
+		lst.append({"key": rkey, "kind": kind, "pos": pos})
+	res_list[c] = lst
 	if oaks.size() > 0:
 		mi.add_child(_multi(oak_mesh, oaks))
 	if pines.size() > 0:
@@ -727,6 +1156,8 @@ func _make_chunk(c: Vector2i) -> MeshInstance3D:
 		var lt := lr.randi() % 3
 		if lh > WATER_Y + 1.5 and lh < 16.0:
 			mi.add_child(_landmark(lt, Vector3(lx, lh, lz), lr))
+			if lt == 1:
+				camps[c] = Vector3(lx, lh, lz)
 
 	for i in 5:
 		var bx := ox + rng.randf() * CHUNK_SIZE
@@ -779,7 +1210,6 @@ func _landmark(kind: int, pos: Vector3, rng: RandomNumberGenerator) -> Node3D:
 	var root := Node3D.new()
 	root.position = pos
 	if kind == 0:
-		# Tháp cổ + tia sáng
 		_prop(root, tower_mesh, veg_mat, Vector3(0, -1.5, 0), 0.0, Vector3.ONE)
 		for i in 7:
 			var a := rng.randf() * TAU
@@ -797,7 +1227,6 @@ func _landmark(kind: int, pos: Vector3, rng: RandomNumberGenerator) -> Node3D:
 		bm.position.y = 45.0
 		root.add_child(bm)
 	elif kind == 1:
-		# Trại bỏ hoang + lửa trại
 		for i in 3:
 			var a := float(i) * 2.1 + rng.randf() * 0.5
 			_prop(root, tent_mesh, veg_mat, Vector3(cos(a) * 5.5, -0.1, sin(a) * 5.5), a + 1.57, Vector3.ONE)
@@ -812,7 +1241,6 @@ func _landmark(kind: int, pos: Vector3, rng: RandomNumberGenerator) -> Node3D:
 		lamp.position = Vector3(0, 1.8, 0)
 		root.add_child(lamp)
 	else:
-		# Cây cổ thụ khổng lồ
 		_prop(root, oak_mesh, veg_mat, Vector3(0, -0.3, 0), rng.randf() * TAU, Vector3(4.0, 4.0, 4.0))
 		for i in 6:
 			var a3 := rng.randf() * TAU
