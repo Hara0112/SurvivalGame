@@ -1,19 +1,39 @@
 extends Node3D
 
 const PORT := 7777
-const CHUNK_SIZE := 32.0
-const RES := 16
+const CHUNK_SIZE := 48.0
+const RES := 20
 const VIEW := 2
 const WALK := 8.0
 const RUN := 14.0
 const WATER_Y := -3.0
+const DAY_LEN := 480.0
 
-var noise := FastNoiseLite.new()
+var noise: FastNoiseLite
+var mnoise: FastNoiseLite
+var tnoise: FastNoiseLite
+var dnoise: FastNoiseLite
+var fnoise: FastNoiseLite
 var mat := StandardMaterial3D.new()
-var bush_mat := StandardMaterial3D.new()
+var veg_mat := StandardMaterial3D.new()
+var flame_mat := StandardMaterial3D.new()
+var beam_mat := StandardMaterial3D.new()
+var oak_mesh: ArrayMesh
+var pine_mesh: ArrayMesh
+var cactus_mesh: ArrayMesh
+var rock_mesh: ArrayMesh
+var bush_mesh: ArrayMesh
+var tower_mesh: ArrayMesh
+var tent_mesh: ArrayMesh
+var flame_mesh: ArrayMesh
+var env: Environment
+var sun: DirectionalLight3D
 var chunks := {}
 var taken := {}
+var pending: Array = []
 var last_chunk := Vector2i(99999, 99999)
+var biome_name := ""
+var time_name := ""
 
 var player: Node3D
 var pivot: Node3D
@@ -52,34 +72,65 @@ var btn_pick: Panel
 var btn_drink: Panel
 var bars := {}
 
-func _ready() -> void:
-	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	noise.seed = 1337
-	noise.frequency = 0.01
-	noise.fractal_octaves = 4
-	mat.vertex_color_use_as_albedo = true
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	bush_mat.albedo_color = Color(0.6, 0.1, 0.5)
+func _mk_noise(seed_: int, freq: float, oct: int) -> FastNoiseLite:
+	var n := FastNoiseLite.new()
+	n.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	n.seed = seed_
+	n.frequency = freq
+	n.fractal_octaves = oct
+	return n
 
-	var env := Environment.new()
+func _ready() -> void:
+	noise = _mk_noise(1337, 0.012, 4)
+	mnoise = _mk_noise(2024, 0.0035, 3)
+	tnoise = _mk_noise(77, 0.004, 2)
+	dnoise = _mk_noise(5, 0.12, 1)
+	fnoise = _mk_noise(99, 0.02, 2)
+
+	mat.vertex_color_use_as_albedo = true
+	mat.vertex_color_is_srgb = true
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	veg_mat.vertex_color_use_as_albedo = true
+	veg_mat.vertex_color_is_srgb = true
+	veg_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	flame_mat.vertex_color_use_as_albedo = true
+	flame_mat.vertex_color_is_srgb = true
+	flame_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	beam_mat.albedo_color = Color(0.4, 0.9, 1.0, 0.35)
+	beam_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	beam_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	beam_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+	oak_mesh = _mesh_oak()
+	pine_mesh = _mesh_pine()
+	cactus_mesh = _mesh_cactus()
+	rock_mesh = _mesh_rock()
+	bush_mesh = _mesh_bush()
+	tower_mesh = _mesh_tower()
+	tent_mesh = _mesh_tent()
+	flame_mesh = _mesh_flame()
+
+	env = Environment.new()
 	env.background_mode = Environment.BG_COLOR
 	env.background_color = Color(0.55, 0.75, 0.95)
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color(0.7, 0.7, 0.75)
 	env.ambient_light_energy = 0.6
+	env.fog_enabled = true
+	env.fog_density = 0.004
+	env.fog_light_color = Color(0.55, 0.75, 0.95)
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-50, -30, 0)
+	sun = DirectionalLight3D.new()
 	add_child(sun)
 
 	water = MeshInstance3D.new()
 	var pl := PlaneMesh.new()
-	pl.size = Vector2(600, 600)
+	pl.size = Vector2(800, 800)
 	water.mesh = pl
 	var wm := StandardMaterial3D.new()
-	wm.albedo_color = Color(0.2, 0.45, 0.85, 0.7)
+	wm.albedo_color = Color(0.15, 0.4, 0.8, 0.75)
 	wm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	water.material_override = wm
 	water.position.y = WATER_Y
@@ -99,10 +150,11 @@ func _ready() -> void:
 	player.add_child(pivot)
 	cam = Camera3D.new()
 	cam.position = Vector3(0, 0.5, 6)
-	cam.far = 300.0
+	cam.far = 400.0
 	pivot.add_child(cam)
 
 	_build_ui()
+	_update_sky()
 
 func _build_ui() -> void:
 	var ui := CanvasLayer.new()
@@ -114,7 +166,7 @@ func _build_ui() -> void:
 	ui.add_child(label)
 
 	var bx := VBoxContainer.new()
-	bx.position = Vector2(20, 90)
+	bx.position = Vector2(20, 120)
 	bx.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(bx)
 	var defs := [["Máu", Color(0.9, 0.2, 0.2)], ["Đói", Color(0.9, 0.6, 0.2)], ["Khát", Color(0.3, 0.6, 1.0)], ["Thể lực", Color(0.3, 0.9, 0.4)]]
@@ -138,7 +190,7 @@ func _build_ui() -> void:
 		bars[d[0]] = pb
 
 	msg = Label.new()
-	msg.position = Vector2(20, 240)
+	msg.position = Vector2(20, 270)
 	msg.add_theme_font_size_override("font_size", 26)
 	ui.add_child(msg)
 
@@ -343,14 +395,58 @@ func _start(note: String) -> void:
 	net_note = note
 	menu.visible = false
 	started = true
-	player.position = Vector3(randf_range(-6, 6), 0, randf_range(-6, 6))
+	player.position = _spawn_pos()
+
+func _spawn_pos() -> Vector3:
+	for i in 300:
+		var a := float(i) * 0.9
+		var r := float(i) * 2.5
+		var x := cos(a) * r
+		var z := sin(a) * r
+		var h := _height(x, z)
+		if _biome_id(h, tnoise.get_noise_2d(x, z)) == 0 and h < 7.0:
+			return Vector3(x + randf_range(-4.0, 4.0), 0.0, z + randf_range(-4.0, 4.0))
+	return Vector3(0.0, 0.0, 0.0)
 
 func _say(t: String) -> void:
 	msg.text = t
 	msg_time = 3.0
 
 func _height(x: float, z: float) -> float:
-	return noise.get_noise_2d(x, z) * 14.0
+	var h := noise.get_noise_2d(x, z) * 10.0
+	var m := mnoise.get_noise_2d(x, z)
+	if m > 0.28:
+		h += (m - 0.28) * 90.0
+	return h
+
+func _biome_id(h: float, t: float) -> int:
+	if h < WATER_Y + 1.5 or h > 22.0:
+		return -1
+	if h > 12.0:
+		return 3
+	if t > 0.3:
+		return 1
+	if t < -0.28:
+		return 2
+	return 0
+
+func _biome_label(x: float, z: float, h: float) -> String:
+	var t := tnoise.get_noise_2d(x, z)
+	if h < WATER_Y + 0.5:
+		return "Hồ nước"
+	if h < WATER_Y + 1.5:
+		return "Bãi cát ven hồ"
+	if h > 22.0:
+		return "Đỉnh núi tuyết"
+	if h > 12.0:
+		return "Núi đá"
+	if t > 0.3:
+		return "Sa mạc"
+	if t < -0.28:
+		return "Vùng tuyết"
+	if fnoise.get_noise_2d(x, z) > 0.0:
+		return "Rừng rậm"
+	return "Đồng cỏ"
 
 func _input(e: InputEvent) -> void:
 	if not started:
@@ -407,7 +503,7 @@ func _pick() -> void:
 				if multiplayer.has_multiplayer_peer():
 					_take.rpc(key)
 				return
-	_say("Không có bụi quả (màu tím) gần đây")
+	_say("Không có bụi quả đỏ gần đây")
 
 func _drink() -> void:
 	if _height(player.position.x, player.position.z) < WATER_Y + 1.0:
@@ -439,8 +535,23 @@ func _tick(delta: float, sprint: bool) -> void:
 		hunger = 100.0
 		thirst = 100.0
 		stamina = 100.0
-		player.position = Vector3(randf_range(-6, 6), 0, randf_range(-6, 6))
+		player.position = _spawn_pos()
 		_say("Bạn đã chết và hồi sinh!")
+
+func _update_sky() -> void:
+	var t := fmod(Time.get_unix_time_from_system() / DAY_LEN + 0.08, 1.0)
+	var th := t * TAU
+	var s := sin(th)
+	var f := clampf(s * 2.0 + 0.3, 0.0, 1.0)
+	var warm := clampf(1.0 - absf(s - 0.05) * 4.0, 0.0, 1.0)
+	var col := Color(0.02, 0.03, 0.09).lerp(Color(0.55, 0.75, 0.95), f).lerp(Color(1.0, 0.55, 0.3), warm * 0.4)
+	env.background_color = col
+	env.fog_light_color = col
+	env.ambient_light_energy = lerpf(0.2, 0.6, f)
+	sun.rotation = Vector3(-th, -0.5, 0.0)
+	sun.light_energy = maxf(s, 0.0) * 1.1
+	sun.light_color = Color(1, 1, 1).lerp(Color(1.0, 0.6, 0.4), warm)
+	time_name = "Đêm" if s < -0.05 else "Ngày"
 
 func _process(delta: float) -> void:
 	if not started:
@@ -456,6 +567,8 @@ func _process(delta: float) -> void:
 	water.position = Vector3(player.position.x, WATER_Y, player.position.z)
 	_tick(delta, sprint)
 	_update_chunks()
+	_gen_pending()
+	_update_sky()
 
 	for id in others.keys():
 		if targets.has(id):
@@ -474,7 +587,8 @@ func _process(delta: float) -> void:
 		msg_time -= delta
 		if msg_time <= 0.0:
 			msg.text = ""
-	label.text = "FPS %d | Người chơi: %d\n%s" % [Engine.get_frames_per_second(), others.size() + 1, net_note]
+	biome_name = _biome_label(player.position.x, player.position.z, player.position.y)
+	label.text = "FPS %d | Người chơi: %d | %s\n%s\n%s" % [Engine.get_frames_per_second(), others.size() + 1, time_name, biome_name, net_note]
 
 # ---------- THẾ GIỚI ----------
 func _update_chunks() -> void:
@@ -490,69 +604,317 @@ func _update_chunks() -> void:
 		if not need.has(k):
 			chunks[k].queue_free()
 			chunks.erase(k)
+	pending.clear()
 	for k in need.keys():
 		if not chunks.has(k):
-			var m := _make_chunk(k)
-			chunks[k] = m
-			add_child(m)
+			pending.append(k)
+	pending.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return Vector2(a - pc).length() < Vector2(b - pc).length())
+
+func _gen_pending() -> void:
+	var n := 0
+	while not pending.is_empty() and n < 2:
+		var k: Vector2i = pending.pop_front()
+		if chunks.has(k):
+			continue
+		var m := _make_chunk(k)
+		chunks[k] = m
+		add_child(m)
+		n += 1
+
+func _vcolor(x: float, z: float, h: float, t: float) -> Color:
+	var c := Color(0.28, 0.58, 0.22)
+	c = c.lerp(Color(0.88, 0.72, 0.38), smoothstep(0.22, 0.34, t))
+	c = c.lerp(Color(0.93, 0.96, 1.0), smoothstep(-0.2, -0.32, t))
+	if h < WATER_Y + 0.4:
+		c = Color(0.5, 0.45, 0.32)
+	elif h < WATER_Y + 1.5:
+		c = Color(0.85, 0.78, 0.5)
+	if h > 12.0:
+		c = c.lerp(Color(0.5, 0.5, 0.52), clampf((h - 12.0) / 6.0, 0.0, 1.0))
+	if h > 24.0:
+		c = c.lerp(Color(0.97, 0.98, 1.0), clampf((h - 24.0) / 6.0, 0.0, 1.0))
+	var v := 0.92 + dnoise.get_noise_2d(x, z) * 0.12
+	return Color(c.r * v, c.g * v, c.b * v)
 
 func _make_chunk(c: Vector2i) -> MeshInstance3D:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var n := RES + 1
 	var step := CHUNK_SIZE / RES
 	var ox := c.x * CHUNK_SIZE
 	var oz := c.y * CHUNK_SIZE
+	var hs := PackedFloat32Array()
+	var cols := PackedColorArray()
+	hs.resize(n * n)
+	cols.resize(n * n)
+	for i in n:
+		for j in n:
+			var x := ox + i * step
+			var z := oz + j * step
+			var h := _height(x, z)
+			hs[i * n + j] = h
+			cols[i * n + j] = _vcolor(x, z, h, tnoise.get_noise_2d(x, z))
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	for i in RES:
 		for j in RES:
 			var x0 := ox + i * step
 			var x1 := x0 + step
 			var z0 := oz + j * step
 			var z1 := z0 + step
-			var a := Vector3(x0, _height(x0, z0), z0)
-			var b := Vector3(x1, _height(x1, z0), z0)
-			var d := Vector3(x0, _height(x0, z1), z1)
-			var e := Vector3(x1, _height(x1, z1), z1)
-			_tri(st, a, b, d)
-			_tri(st, b, e, d)
+			var a := Vector3(x0, hs[i * n + j], z0)
+			var b := Vector3(x1, hs[(i + 1) * n + j], z0)
+			var d := Vector3(x0, hs[i * n + j + 1], z1)
+			var e := Vector3(x1, hs[(i + 1) * n + j + 1], z1)
+			_tri(st, a, b, d, cols[i * n + j], cols[(i + 1) * n + j], cols[i * n + j + 1])
+			_tri(st, b, e, d, cols[(i + 1) * n + j], cols[(i + 1) * n + j + 1], cols[i * n + j + 1])
 	var mi := MeshInstance3D.new()
 	mi.mesh = st.commit()
 	mi.material_override = mat
 
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(c)
-	for i in 4:
+	var oaks: Array = []
+	var pines: Array = []
+	var cacti: Array = []
+	var rocks: Array = []
+	for i in 70:
+		var x := ox + rng.randf() * CHUNK_SIZE
+		var z := oz + rng.randf() * CHUNK_SIZE
+		var roll := rng.randf()
+		var s := 0.8 + rng.randf() * 0.7
+		var ang := rng.randf() * TAU
+		var h := _height(x, z)
+		var bid := _biome_id(h, tnoise.get_noise_2d(x, z))
+		if bid < 0:
+			continue
+		var pos := Vector3(x, h - 0.1, z)
+		var dens := clampf(0.4 + fnoise.get_noise_2d(x, z) * 1.2, 0.05, 0.85)
+		match bid:
+			0:
+				if roll < dens:
+					oaks.append(_xf(pos, ang, s, s))
+				elif roll > 0.97:
+					rocks.append(_xf(pos, ang, s * 0.8, s * 0.7))
+			1:
+				if roll < 0.2:
+					cacti.append(_xf(pos, ang, s, s))
+				elif roll > 0.9:
+					rocks.append(_xf(pos, ang, s, s * 0.8))
+			2:
+				if roll < dens * 0.8:
+					pines.append(_xf(pos, ang, s, s))
+				elif roll > 0.95:
+					rocks.append(_xf(pos, ang, s, s * 0.8))
+			3:
+				if roll < 0.25:
+					rocks.append(_xf(pos, ang, s * 1.6, s * 1.3))
+	if oaks.size() > 0:
+		mi.add_child(_multi(oak_mesh, oaks))
+	if pines.size() > 0:
+		mi.add_child(_multi(pine_mesh, pines))
+	if cacti.size() > 0:
+		mi.add_child(_multi(cactus_mesh, cacti))
+	if rocks.size() > 0:
+		mi.add_child(_multi(rock_mesh, rocks))
+
+	var lr := RandomNumberGenerator.new()
+	lr.seed = hash(c) + 7777
+	if lr.randf() < 0.10:
+		var lx := ox + 8.0 + lr.randf() * (CHUNK_SIZE - 16.0)
+		var lz := oz + 8.0 + lr.randf() * (CHUNK_SIZE - 16.0)
+		var lh := _height(lx, lz)
+		var lt := lr.randi() % 3
+		if lh > WATER_Y + 1.5 and lh < 16.0:
+			mi.add_child(_landmark(lt, Vector3(lx, lh, lz), lr))
+
+	for i in 5:
 		var bx := ox + rng.randf() * CHUNK_SIZE
 		var bz := oz + rng.randf() * CHUNK_SIZE
+		var roll2 := rng.randf()
+		var rot := rng.randf() * TAU
 		var by := _height(bx, bz)
 		var key := "%d_%d_%d" % [c.x, c.y, i]
-		if by < WATER_Y + 1.0 or by > 6.0 or taken.has(key):
+		if roll2 > 0.5 or taken.has(key):
 			continue
-		var b := MeshInstance3D.new()
-		var sm := SphereMesh.new()
-		sm.radius = 0.6
-		sm.height = 1.2
-		b.mesh = sm
-		b.material_override = bush_mat
-		b.position = Vector3(bx, by + 0.5, bz)
-		b.set_meta("key", key)
-		mi.add_child(b)
+		if _biome_id(by, tnoise.get_noise_2d(bx, bz)) != 0:
+			continue
+		var bs := MeshInstance3D.new()
+		bs.mesh = bush_mesh
+		bs.material_override = veg_mat
+		bs.position = Vector3(bx, by - 0.05, bz)
+		bs.rotation.y = rot
+		bs.set_meta("key", key)
+		mi.add_child(bs)
 	return mi
 
-func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
-	var n := (b - a).cross(c - a).normalized()
-	if n.y < 0.0:
-		n = -n
-	var col := _col((a.y + b.y + c.y) / 3.0)
+func _xf(pos: Vector3, ang: float, sxz: float, sy: float) -> Transform3D:
+	var b := Basis(Vector3.UP, ang).scaled(Vector3(sxz, sy, sxz))
+	return Transform3D(b, pos)
+
+func _multi(m: Mesh, xf: Array) -> MultiMeshInstance3D:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = m
+	mm.instance_count = xf.size()
+	for i in xf.size():
+		mm.set_instance_transform(i, xf[i])
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.material_override = veg_mat
+	return mmi
+
+func _prop(root: Node3D, m: Mesh, mt: Material, off: Vector3, rot: float, sc: Vector3) -> void:
+	var p := MeshInstance3D.new()
+	p.mesh = m
+	p.material_override = mt
+	var wx := root.position.x + off.x
+	var wz := root.position.z + off.z
+	p.position = Vector3(off.x, _height(wx, wz) - root.position.y + off.y, off.z)
+	p.rotation.y = rot
+	p.scale = sc
+	root.add_child(p)
+
+func _landmark(kind: int, pos: Vector3, rng: RandomNumberGenerator) -> Node3D:
+	var root := Node3D.new()
+	root.position = pos
+	if kind == 0:
+		# Tháp cổ + tia sáng
+		_prop(root, tower_mesh, veg_mat, Vector3(0, -1.5, 0), 0.0, Vector3.ONE)
+		for i in 7:
+			var a := rng.randf() * TAU
+			var d := 3.5 + rng.randf() * 3.5
+			var sc := 0.6 + rng.randf() * 0.8
+			_prop(root, rock_mesh, veg_mat, Vector3(cos(a) * d, -0.2, sin(a) * d), a, Vector3(sc, sc, sc))
+		var bm := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.35
+		cm.bottom_radius = 0.35
+		cm.height = 90.0
+		cm.radial_segments = 6
+		bm.mesh = cm
+		bm.material_override = beam_mat
+		bm.position.y = 45.0
+		root.add_child(bm)
+	elif kind == 1:
+		# Trại bỏ hoang + lửa trại
+		for i in 3:
+			var a := float(i) * 2.1 + rng.randf() * 0.5
+			_prop(root, tent_mesh, veg_mat, Vector3(cos(a) * 5.5, -0.1, sin(a) * 5.5), a + 1.57, Vector3.ONE)
+		for i in 7:
+			var a2 := float(i) * TAU / 7.0
+			_prop(root, rock_mesh, veg_mat, Vector3(cos(a2) * 1.4, -0.1, sin(a2) * 1.4), a2, Vector3(0.3, 0.3, 0.3))
+		_prop(root, flame_mesh, flame_mat, Vector3(0, 0.0, 0), 0.0, Vector3.ONE)
+		var lamp := OmniLight3D.new()
+		lamp.light_color = Color(1.0, 0.6, 0.25)
+		lamp.light_energy = 2.5
+		lamp.omni_range = 18.0
+		lamp.position = Vector3(0, 1.8, 0)
+		root.add_child(lamp)
+	else:
+		# Cây cổ thụ khổng lồ
+		_prop(root, oak_mesh, veg_mat, Vector3(0, -0.3, 0), rng.randf() * TAU, Vector3(4.0, 4.0, 4.0))
+		for i in 6:
+			var a3 := rng.randf() * TAU
+			var d3 := 6.0 + rng.randf() * 3.0
+			var sc3 := 0.8 + rng.randf() * 1.0
+			_prop(root, rock_mesh, veg_mat, Vector3(cos(a3) * d3, -0.2, sin(a3) * d3), a3, Vector3(sc3, sc3, sc3))
+	return root
+
+# ---------- MESH ----------
+func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, ca: Color, cb: Color, cc: Color) -> void:
+	var nrm := (b - a).cross(c - a).normalized()
+	if nrm.y < 0.0:
+		nrm = -nrm
+	var rock := clampf((0.8 - nrm.y) * 6.0, 0.0, 1.0)
+	var rc := Color(0.45, 0.43, 0.42)
+	var cs := [ca, cb, cc]
+	var vs := [a, b, c]
+	for k in 3:
+		var col: Color = cs[k]
+		st.set_normal(nrm)
+		st.set_color(col.lerp(rc, rock))
+		st.add_vertex(vs[k])
+
+func _vtri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, col: Color, outv: Vector3) -> void:
+	var nrm := (b - a).cross(c - a).normalized()
+	if nrm.dot(outv) < 0.0:
+		nrm = -nrm
 	for v in [a, b, c]:
-		st.set_normal(n)
+		st.set_normal(nrm)
 		st.set_color(col)
 		st.add_vertex(v)
 
-func _col(h: float) -> Color:
-	if h < WATER_Y:
-		return Color(0.85, 0.78, 0.5)
-	if h < 6.0:
-		return Color(0.3, 0.6, 0.25)
-	if h < 9.0:
-		return Color(0.5, 0.5, 0.5)
-	return Color(0.95, 0.95, 1.0)
+func _frustum(st: SurfaceTool, ox: float, oz: float, y0: float, y1: float, r0: float, r1: float, col: Color, sides: int) -> void:
+	for i in sides:
+		var a0 := TAU * float(i) / float(sides)
+		var a1 := TAU * float(i + 1) / float(sides)
+		var am := (a0 + a1) * 0.5
+		var outv := Vector3(cos(am), 0.15, sin(am))
+		var b0 := Vector3(ox + cos(a0) * r0, y0, oz + sin(a0) * r0)
+		var b1 := Vector3(ox + cos(a1) * r0, y0, oz + sin(a1) * r0)
+		var t0 := Vector3(ox + cos(a0) * r1, y1, oz + sin(a0) * r1)
+		var t1 := Vector3(ox + cos(a1) * r1, y1, oz + sin(a1) * r1)
+		_vtri(st, b0, t0, b1, col, outv)
+		if r1 > 0.001:
+			_vtri(st, b1, t0, t1, col, outv)
+			_vtri(st, Vector3(ox, y1, oz), t0, t1, col, Vector3.UP)
+
+func _new_st() -> SurfaceTool:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	return st
+
+func _mesh_oak() -> ArrayMesh:
+	var st := _new_st()
+	_frustum(st, 0, 0, 0.0, 2.4, 0.4, 0.28, Color(0.4, 0.27, 0.15), 6)
+	_frustum(st, 0, 0, 1.9, 3.9, 1.9, 1.35, Color(0.2, 0.5, 0.15), 7)
+	_frustum(st, 0, 0, 3.7, 5.6, 1.45, 0.0, Color(0.27, 0.6, 0.18), 7)
+	return st.commit()
+
+func _mesh_pine() -> ArrayMesh:
+	var st := _new_st()
+	_frustum(st, 0, 0, 0.0, 1.6, 0.35, 0.25, Color(0.35, 0.24, 0.14), 6)
+	_frustum(st, 0, 0, 1.2, 3.4, 1.9, 0.5, Color(0.1, 0.38, 0.22), 7)
+	_frustum(st, 0, 0, 2.8, 5.0, 1.5, 0.3, Color(0.12, 0.42, 0.25), 7)
+	_frustum(st, 0, 0, 4.4, 6.6, 1.1, 0.0, Color(0.9, 0.95, 1.0), 7)
+	return st.commit()
+
+func _mesh_cactus() -> ArrayMesh:
+	var st := _new_st()
+	_frustum(st, 0, 0, 0.0, 3.2, 0.45, 0.38, Color(0.2, 0.55, 0.25), 6)
+	_frustum(st, 0.75, 0, 1.3, 2.5, 0.25, 0.22, Color(0.22, 0.58, 0.27), 6)
+	return st.commit()
+
+func _mesh_rock() -> ArrayMesh:
+	var st := _new_st()
+	_frustum(st, 0, 0, 0.0, 0.9, 1.1, 0.8, Color(0.5, 0.49, 0.47), 6)
+	_frustum(st, 0.1, 0, 0.8, 1.5, 0.8, 0.3, Color(0.42, 0.41, 0.4), 6)
+	return st.commit()
+
+func _mesh_bush() -> ArrayMesh:
+	var st := _new_st()
+	_frustum(st, 0, 0, 0.0, 0.8, 0.9, 0.55, Color(0.18, 0.45, 0.15), 7)
+	_frustum(st, 0.35, 0.1, 0.6, 1.0, 0.2, 0.1, Color(0.85, 0.1, 0.2), 5)
+	_frustum(st, -0.3, 0.25, 0.6, 1.0, 0.2, 0.1, Color(0.85, 0.1, 0.2), 5)
+	_frustum(st, 0.0, -0.4, 0.6, 1.0, 0.2, 0.1, Color(0.85, 0.1, 0.2), 5)
+	return st.commit()
+
+func _mesh_tower() -> ArrayMesh:
+	var st := _new_st()
+	_frustum(st, 0, 0, 0.0, 9.0, 2.6, 2.2, Color(0.55, 0.54, 0.52), 8)
+	_frustum(st, 0, 0, 9.0, 11.0, 2.2, 1.0, Color(0.42, 0.41, 0.4), 8)
+	_frustum(st, 1.4, 0, 9.0, 12.5, 0.8, 0.8, Color(0.5, 0.49, 0.47), 6)
+	_frustum(st, 0, 0, 10.5, 11.0, 1.2, 0.9, Color(0.35, 0.5, 0.3), 8)
+	return st.commit()
+
+func _mesh_tent() -> ArrayMesh:
+	var st := _new_st()
+	_frustum(st, 0, 0, 0.0, 2.4, 2.2, 0.0, Color(0.8, 0.65, 0.4), 4)
+	return st.commit()
+
+func _mesh_flame() -> ArrayMesh:
+	var st := _new_st()
+	_frustum(st, 0, 0, 0.0, 0.9, 0.4, 0.0, Color(1.0, 0.55, 0.1), 5)
+	_frustum(st, 0, 0, 0.0, 0.5, 0.25, 0.0, Color(1.0, 0.9, 0.3), 5)
+	return st.commit()
