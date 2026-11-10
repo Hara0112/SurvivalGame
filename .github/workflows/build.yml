@@ -1,0 +1,38 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Godot + Android
+        run: |
+          mkdir -p ~/.local/share/godot/export_templates ~/.config/godot
+          mv /root/.local/share/godot/export_templates/4.3.stable ~/.local/share/godot/export_templates/4.3.stable
+          keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android -keystore debug.keystore -storepass android -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
+          mv debug.keystore /root/debug.keystore
+          for f in editor_settings-4.tres editor_settings-4.3.tres; do
+            echo '[gd_resource type="EditorSettings" format=3]' > ~/.config/godot/$f
+            echo '[resource]' >> ~/.config/godot/$f
+            echo 'export/android/android_sdk_path = "/usr/lib/android-sdk"' >> ~/.config/godot/$f
+            echo 'export/android/debug_keystore = "/root/debug.keystore"' >> ~/.config/godot/$f
+            echo 'export/android/debug_keystore_user = "androiddebugkey"' >> ~/.config/godot/$f
+            echo 'export/android/debug_keystore_pass = "android"' >> ~/.config/godot/$f
+            echo 'export/android/force_system_user = false' >> ~/.config/godot/$f
+            echo 'export/android/shutdown_adb_on_exit = true' >> ~/.config/godot/$f
+          done
+      - name: Import + Export APK
+        run: |
+          mkdir -p build
+          godot --headless --import || true
+          godot --headless --export-debug "Android" build/SurvivalGame.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SurvivalGame-apk
+          path: build/SurvivalGame.apk
