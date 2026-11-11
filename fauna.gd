@@ -314,8 +314,9 @@ func use_item(id: String) -> bool:
 		_eat(id, 60.0, 0.0, 10.0, "Húp súp rau củ (+60 no, +10 máu)")
 	elif id == "seed":
 		_plant_seed()
-	else:
-		return false
+		else:
+		var tl = get_node_or_null("/root/Gear")
+		return tl != null and tl.use_item(id)
 	return true
 
 func _plant_seed() -> void:
