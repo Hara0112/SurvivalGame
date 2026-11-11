@@ -2,23 +2,26 @@ extends Node3D
 
 const PORT := 7777
 const CHUNK_SIZE := 48.0
-const RES := 20
+const RES := 28
 const VIEW := 2
 const WALK := 8.0
 const RUN := 14.0
 const WATER_Y := -3.0
 const DAY_LEN := 480.0
+const SHADOWS := true
 
 var noise: FastNoiseLite
 var mnoise: FastNoiseLite
 var tnoise: FastNoiseLite
 var dnoise: FastNoiseLite
 var fnoise: FastNoiseLite
+var gnoise: FastNoiseLite
 var mat := StandardMaterial3D.new()
 var veg_mat := StandardMaterial3D.new()
 var flame_mat := StandardMaterial3D.new()
 var beam_mat := StandardMaterial3D.new()
-var oak_mesh: ArrayMesh
+var oak_a: ArrayMesh
+var oak_b: ArrayMesh
 var pine_mesh: ArrayMesh
 var cactus_mesh: ArrayMesh
 var rock_mesh: ArrayMesh
@@ -26,7 +29,11 @@ var bush_mesh: ArrayMesh
 var tower_mesh: ArrayMesh
 var tent_mesh: ArrayMesh
 var flame_mesh: ArrayMesh
+var grass_mesh: ArrayMesh
+var dry_mesh: ArrayMesh
+var flower_mesh: ArrayMesh
 var env: Environment
+var sky_mat: ProceduralSkyMaterial
 var sun: DirectionalLight3D
 var chunks := {}
 var taken := {}
@@ -85,7 +92,7 @@ var look_id := -1
 var run_id := -1
 var joy_origin := Vector2.ZERO
 var yaw := 0.0
-var pitch := -0.3
+var pitch := 0.0
 
 var label: Label
 var msg: Label
@@ -119,13 +126,18 @@ func _ready() -> void:
 	tnoise = _mk_noise(77, 0.004, 2)
 	dnoise = _mk_noise(5, 0.12, 1)
 	fnoise = _mk_noise(99, 0.02, 2)
+	gnoise = _mk_noise(123, 0.035, 2)
 
 	mat.vertex_color_use_as_albedo = true
 	mat.vertex_color_is_srgb = true
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.roughness = 1.0
+	mat.metallic_specular = 0.0
 	veg_mat.vertex_color_use_as_albedo = true
 	veg_mat.vertex_color_is_srgb = true
 	veg_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	veg_mat.roughness = 1.0
+	veg_mat.metallic_specular = 0.1
 	flame_mat.vertex_color_use_as_albedo = true
 	flame_mat.vertex_color_is_srgb = true
 	flame_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -134,7 +146,8 @@ func _ready() -> void:
 	beam_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	beam_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 
-	oak_mesh = _mesh_oak()
+	oak_a = _mesh_oak(true)
+	oak_b = _mesh_oak(false)
 	pine_mesh = _mesh_pine()
 	cactus_mesh = _mesh_cactus()
 	rock_mesh = _mesh_rock()
@@ -142,20 +155,35 @@ func _ready() -> void:
 	tower_mesh = _mesh_tower()
 	tent_mesh = _mesh_tent()
 	flame_mesh = _mesh_flame()
+	grass_mesh = _mesh_grass(Color(0.14, 0.4, 0.1), Color(0.5, 0.78, 0.25))
+	dry_mesh = _mesh_grass(Color(0.45, 0.35, 0.15), Color(0.85, 0.72, 0.4))
+	flower_mesh = _mesh_flower()
 
+	sky_mat = ProceduralSkyMaterial.new()
+	var sky := Sky.new()
+	sky.sky_material = sky_mat
 	env = Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.55, 0.75, 0.95)
+	env.background_mode = Environment.BG_SKY
+	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.7, 0.7, 0.75)
+	env.ambient_light_color = Color(0.62, 0.68, 0.8)
 	env.ambient_light_energy = 0.6
 	env.fog_enabled = true
-	env.fog_density = 0.004
-	env.fog_light_color = Color(0.55, 0.75, 0.95)
+	env.fog_density = 0.005
+	env.fog_sky_affect = 0.0
+	env.fog_light_color = Color(0.68, 0.82, 0.95)
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
+
 	sun = DirectionalLight3D.new()
+	if SHADOWS:
+		RenderingServer.directional_shadow_atlas_set_size(2048, true)
+		sun.shadow_enabled = true
+		sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+		sun.directional_shadow_max_distance = 70.0
+		sun.shadow_bias = 0.08
+		sun.shadow_normal_bias = 1.5
 	add_child(sun)
 
 	water = MeshInstance3D.new()
@@ -163,8 +191,10 @@ func _ready() -> void:
 	pl.size = Vector2(800, 800)
 	water.mesh = pl
 	var wm := StandardMaterial3D.new()
-	wm.albedo_color = Color(0.15, 0.4, 0.8, 0.75)
+	wm.albedo_color = Color(0.1, 0.42, 0.6, 0.8)
 	wm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	wm.roughness = 0.15
+	wm.metallic_specular = 0.9
 	water.material_override = wm
 	water.position.y = WATER_Y
 	add_child(water)
@@ -174,15 +204,14 @@ func _ready() -> void:
 	var body := MeshInstance3D.new()
 	body.mesh = CapsuleMesh.new()
 	body.position.y = 1.0
-	var pm := StandardMaterial3D.new()
-	pm.albedo_color = Color(0.9, 0.3, 0.2)
-	body.material_override = pm
+	body.visible = false
 	player.add_child(body)
 	pivot = Node3D.new()
-	pivot.position.y = 1.5
+	pivot.position.y = 1.65
 	player.add_child(pivot)
 	cam = Camera3D.new()
-	cam.position = Vector3(0, 0.5, 6)
+	cam.position = Vector3(0, 0, 0)
+	cam.fov = 75.0
 	cam.far = 400.0
 	pivot.add_child(cam)
 
@@ -198,6 +227,13 @@ func _build_ui() -> void:
 	label.position = Vector2(20, 15)
 	label.add_theme_font_size_override("font_size", 24)
 	ui.add_child(label)
+
+	var cross := Label.new()
+	cross.text = "+"
+	cross.add_theme_font_size_override("font_size", 40)
+	cross.set_anchors_preset(Control.PRESET_CENTER)
+	cross.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(cross)
 
 	var bx := VBoxContainer.new()
 	bx.position = Vector2(20, 120)
@@ -829,7 +865,7 @@ func _input(e: InputEvent) -> void:
 			joy_knob.position = joy_origin + move_vec * 100.0 - joy_knob.size / 2.0
 		elif d.index == look_id:
 			yaw -= d.relative.x * 0.005
-			pitch = clampf(pitch + d.relative.y * 0.005, -1.2, 0.3)
+			pitch = clampf(pitch - d.relative.y * 0.005, -1.4, 1.4)
 
 func _gather() -> void:
 	if act_cd > 0.0:
@@ -948,13 +984,22 @@ func _update_sky() -> void:
 	var s := sin(th)
 	var f := clampf(s * 2.0 + 0.3, 0.0, 1.0)
 	var warm := clampf(1.0 - absf(s - 0.05) * 4.0, 0.0, 1.0)
-	var col := Color(0.02, 0.03, 0.09).lerp(Color(0.55, 0.75, 0.95), f).lerp(Color(1.0, 0.55, 0.3), warm * 0.4)
-	env.background_color = col
-	env.fog_light_color = col
-	env.ambient_light_energy = lerpf(0.2, 0.6, f)
+	var top := Color(0.01, 0.015, 0.05).lerp(Color(0.22, 0.47, 0.88), f)
+	var hor := Color(0.03, 0.04, 0.11).lerp(Color(0.68, 0.82, 0.95), f).lerp(Color(1.0, 0.55, 0.3), warm * 0.45)
+	sky_mat.sky_top_color = top
+	sky_mat.sky_horizon_color = hor
+	sky_mat.ground_horizon_color = hor
+	sky_mat.ground_bottom_color = hor.darkened(0.4)
+	env.fog_light_color = hor
+	env.ambient_light_color = Color(0.25, 0.3, 0.5).lerp(Color(0.62, 0.68, 0.8), f)
+	env.ambient_light_energy = lerpf(0.25, 0.6, f)
 	sun.rotation = Vector3(-th, -0.5, 0.0)
-	sun.light_energy = maxf(s, 0.0) * 1.1
-	sun.light_color = Color(1, 1, 1).lerp(Color(1.0, 0.6, 0.4), warm)
+	sun.light_energy = maxf(s, 0.0) * 1.25
+	sun.light_color = Color(1.0, 0.96, 0.88).lerp(Color(1.0, 0.55, 0.35), warm)
+	if SHADOWS:
+		var want := s > 0.05
+		if want != sun.shadow_enabled:
+			sun.shadow_enabled = want
 	time_name = "Đêm" if s < -0.05 else "Ngày"
 
 func _process(delta: float) -> void:
@@ -1019,8 +1064,9 @@ func _update_chunks() -> void:
 		return Vector2(a - pc).length() < Vector2(b - pc).length())
 
 func _gen_pending() -> void:
+	var budget := 3 if chunks.size() < 9 else 1
 	var n := 0
-	while not pending.is_empty() and n < 2:
+	while not pending.is_empty() and n < budget:
 		var k: Vector2i = pending.pop_front()
 		if chunks.has(k):
 			continue
@@ -1030,8 +1076,12 @@ func _gen_pending() -> void:
 		n += 1
 
 func _vcolor(x: float, z: float, h: float, t: float) -> Color:
-	var c := Color(0.28, 0.58, 0.22)
-	c = c.lerp(Color(0.88, 0.72, 0.38), smoothstep(0.22, 0.34, t))
+	var pn := gnoise.get_noise_2d(x, z)
+	var fn := fnoise.get_noise_2d(x, z)
+	var c := Color(0.22, 0.56, 0.14).lerp(Color(0.52, 0.64, 0.2), smoothstep(-0.1, 0.5, pn))
+	c = c.lerp(c.darkened(0.3), clampf(fn * 1.5, 0.0, 1.0))
+	c = c.lerp(Color(0.4, 0.3, 0.18), smoothstep(-0.35, -0.55, pn))
+	c = c.lerp(Color(0.86, 0.7, 0.36), smoothstep(0.22, 0.34, t))
 	c = c.lerp(Color(0.93, 0.96, 1.0), smoothstep(-0.2, -0.32, t))
 	if h < WATER_Y + 0.4:
 		c = Color(0.5, 0.45, 0.32)
@@ -1041,8 +1091,18 @@ func _vcolor(x: float, z: float, h: float, t: float) -> Color:
 		c = c.lerp(Color(0.5, 0.5, 0.52), clampf((h - 12.0) / 6.0, 0.0, 1.0))
 	if h > 24.0:
 		c = c.lerp(Color(0.97, 0.98, 1.0), clampf((h - 24.0) / 6.0, 0.0, 1.0))
-	var v := 0.92 + dnoise.get_noise_2d(x, z) * 0.12
+	var v := 0.92 + dnoise.get_noise_2d(x, z) * 0.14
 	return Color(c.r * v, c.g * v, c.b * v)
+
+func _gh(hs: PackedFloat32Array, n: int, i: int, j: int, ox: float, oz: float, step: float) -> float:
+	if i >= 0 and i < n and j >= 0 and j < n:
+		return hs[i * n + j]
+	return _height(ox + i * step, oz + j * step)
+
+func _vert(st: SurfaceTool, p: Vector3, nrm: Vector3, col: Color) -> void:
+	st.set_normal(nrm)
+	st.set_color(col)
+	st.add_vertex(p)
 
 func _make_chunk(c: Vector2i) -> MeshInstance3D:
 	camps.erase(c)
@@ -1052,37 +1112,59 @@ func _make_chunk(c: Vector2i) -> MeshInstance3D:
 	var oz := c.y * CHUNK_SIZE
 	var hs := PackedFloat32Array()
 	var cols := PackedColorArray()
+	var nrms := PackedVector3Array()
 	hs.resize(n * n)
 	cols.resize(n * n)
+	nrms.resize(n * n)
+	for i in n:
+		for j in n:
+			hs[i * n + j] = _height(ox + i * step, oz + j * step)
 	for i in n:
 		for j in n:
 			var x := ox + i * step
 			var z := oz + j * step
-			var h := _height(x, z)
-			hs[i * n + j] = h
-			cols[i * n + j] = _vcolor(x, z, h, tnoise.get_noise_2d(x, z))
+			var h := hs[i * n + j]
+			var hl := _gh(hs, n, i - 1, j, ox, oz, step)
+			var hr := _gh(hs, n, i + 1, j, ox, oz, step)
+			var hu := _gh(hs, n, i, j - 1, ox, oz, step)
+			var hd := _gh(hs, n, i, j + 1, ox, oz, step)
+			var nrm := Vector3(hl - hr, 2.0 * step, hu - hd).normalized()
+			nrms[i * n + j] = nrm
+			var col := _vcolor(x, z, h, tnoise.get_noise_2d(x, z))
+			var rock := clampf((0.8 - nrm.y) * 5.0, 0.0, 1.0)
+			cols[i * n + j] = col.lerp(Color(0.46, 0.44, 0.42), rock)
 
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	for i in RES:
 		for j in RES:
+			var i0 := i * n + j
+			var i1 := (i + 1) * n + j
+			var i2 := i * n + j + 1
+			var i3 := (i + 1) * n + j + 1
 			var x0 := ox + i * step
 			var x1 := x0 + step
 			var z0 := oz + j * step
 			var z1 := z0 + step
-			var a := Vector3(x0, hs[i * n + j], z0)
-			var b := Vector3(x1, hs[(i + 1) * n + j], z0)
-			var d := Vector3(x0, hs[i * n + j + 1], z1)
-			var e := Vector3(x1, hs[(i + 1) * n + j + 1], z1)
-			_tri(st, a, b, d, cols[i * n + j], cols[(i + 1) * n + j], cols[i * n + j + 1])
-			_tri(st, b, e, d, cols[(i + 1) * n + j], cols[(i + 1) * n + j + 1], cols[i * n + j + 1])
+			var pa := Vector3(x0, hs[i0], z0)
+			var pb := Vector3(x1, hs[i1], z0)
+			var pd := Vector3(x0, hs[i2], z1)
+			var pe := Vector3(x1, hs[i3], z1)
+			_vert(st, pa, nrms[i0], cols[i0])
+			_vert(st, pb, nrms[i1], cols[i1])
+			_vert(st, pd, nrms[i2], cols[i2])
+			_vert(st, pb, nrms[i1], cols[i1])
+			_vert(st, pe, nrms[i3], cols[i3])
+			_vert(st, pd, nrms[i2], cols[i2])
 	var mi := MeshInstance3D.new()
 	mi.mesh = st.commit()
 	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(c)
 	var oaks: Array = []
+	var oaks2: Array = []
 	var pines: Array = []
 	var cacti: Array = []
 	var rocks: Array = []
@@ -1124,9 +1206,16 @@ func _make_chunk(c: Vector2i) -> MeshInstance3D:
 					which = "rock"
 		if which == "":
 			continue
+		if which != "rock":
+			var sl := absf(_height(x + 1.5, z) - h) + absf(_height(x, z + 1.5) - h)
+			if sl > 2.6:
+				continue
 		var kind := 0
 		if which == "oak":
-			oaks.append(_xf(pos, ang, s, s))
+			if dens > 0.55:
+				oaks2.append(_xf(pos, ang, s, s))
+			else:
+				oaks.append(_xf(pos, ang, s, s))
 		elif which == "pine":
 			pines.append(_xf(pos, ang, s, s))
 		elif which == "cactus":
@@ -1139,13 +1228,44 @@ func _make_chunk(c: Vector2i) -> MeshInstance3D:
 		lst.append({"key": rkey, "kind": kind, "pos": pos})
 	res_list[c] = lst
 	if oaks.size() > 0:
-		mi.add_child(_multi(oak_mesh, oaks))
+		mi.add_child(_multi(oak_a, oaks, true))
+	if oaks2.size() > 0:
+		mi.add_child(_multi(oak_b, oaks2, true))
 	if pines.size() > 0:
-		mi.add_child(_multi(pine_mesh, pines))
+		mi.add_child(_multi(pine_mesh, pines, true))
 	if cacti.size() > 0:
-		mi.add_child(_multi(cactus_mesh, cacti))
+		mi.add_child(_multi(cactus_mesh, cacti, true))
 	if rocks.size() > 0:
-		mi.add_child(_multi(rock_mesh, rocks))
+		mi.add_child(_multi(rock_mesh, rocks, true))
+
+	var gr := RandomNumberGenerator.new()
+	gr.seed = hash(c) + 31337
+	var tufts: Array = []
+	var drys: Array = []
+	var flowers: Array = []
+	for i in 150:
+		var gx := ox + gr.randf() * CHUNK_SIZE
+		var gz := oz + gr.randf() * CHUNK_SIZE
+		var groll := gr.randf()
+		var gang := gr.randf() * TAU
+		var gs := 0.7 + gr.randf() * 0.9
+		var gh := _height(gx, gz)
+		var gt := tnoise.get_noise_2d(gx, gz)
+		var gb := _biome_id(gh, gt)
+		var gp := Vector3(gx, gh - 0.05, gz)
+		if gb == 0:
+			if groll < 0.8:
+				tufts.append(_xf(gp, gang, gs, gs))
+			elif fnoise.get_noise_2d(gx, gz) < 0.2 and groll > 0.88:
+				flowers.append(_xf(gp, gang, gs, gs))
+		elif gb == 1 and groll < 0.35:
+			drys.append(_xf(gp, gang, gs, gs))
+	if tufts.size() > 0:
+		mi.add_child(_multi(grass_mesh, tufts, false))
+	if drys.size() > 0:
+		mi.add_child(_multi(dry_mesh, drys, false))
+	if flowers.size() > 0:
+		mi.add_child(_multi(flower_mesh, flowers, false))
 
 	var lr := RandomNumberGenerator.new()
 	lr.seed = hash(c) + 7777
@@ -1183,7 +1303,7 @@ func _xf(pos: Vector3, ang: float, sxz: float, sy: float) -> Transform3D:
 	var b := Basis(Vector3.UP, ang).scaled(Vector3(sxz, sy, sxz))
 	return Transform3D(b, pos)
 
-func _multi(m: Mesh, xf: Array) -> MultiMeshInstance3D:
+func _multi(m: Mesh, xf: Array, shadow: bool) -> MultiMeshInstance3D:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.mesh = m
@@ -1193,6 +1313,8 @@ func _multi(m: Mesh, xf: Array) -> MultiMeshInstance3D:
 	var mmi := MultiMeshInstance3D.new()
 	mmi.multimesh = mm
 	mmi.material_override = veg_mat
+	if not shadow:
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return mmi
 
 func _prop(root: Node3D, m: Mesh, mt: Material, off: Vector3, rot: float, sc: Vector3) -> void:
@@ -1224,6 +1346,7 @@ func _landmark(kind: int, pos: Vector3, rng: RandomNumberGenerator) -> Node3D:
 		cm.radial_segments = 6
 		bm.mesh = cm
 		bm.material_override = beam_mat
+		bm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		bm.position.y = 45.0
 		root.add_child(bm)
 	elif kind == 1:
@@ -1241,7 +1364,7 @@ func _landmark(kind: int, pos: Vector3, rng: RandomNumberGenerator) -> Node3D:
 		lamp.position = Vector3(0, 1.8, 0)
 		root.add_child(lamp)
 	else:
-		_prop(root, oak_mesh, veg_mat, Vector3(0, -0.3, 0), rng.randf() * TAU, Vector3(4.0, 4.0, 4.0))
+		_prop(root, oak_a, veg_mat, Vector3(0, -0.3, 0), rng.randf() * TAU, Vector3(4.0, 4.0, 4.0))
 		for i in 6:
 			var a3 := rng.randf() * TAU
 			var d3 := 6.0 + rng.randf() * 3.0
@@ -1250,30 +1373,19 @@ func _landmark(kind: int, pos: Vector3, rng: RandomNumberGenerator) -> Node3D:
 	return root
 
 # ---------- MESH ----------
-func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, ca: Color, cb: Color, cc: Color) -> void:
-	var nrm := (b - a).cross(c - a).normalized()
-	if nrm.y < 0.0:
-		nrm = -nrm
-	var rock := clampf((0.8 - nrm.y) * 6.0, 0.0, 1.0)
-	var rc := Color(0.45, 0.43, 0.42)
-	var cs := [ca, cb, cc]
-	var vs := [a, b, c]
-	for k in 3:
-		var col: Color = cs[k]
-		st.set_normal(nrm)
-		st.set_color(col.lerp(rc, rock))
-		st.add_vertex(vs[k])
-
-func _vtri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, col: Color, outv: Vector3) -> void:
+func _vtri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, ca: Color, cb: Color, cc: Color, outv: Vector3) -> void:
 	var nrm := (b - a).cross(c - a).normalized()
 	if nrm.dot(outv) < 0.0:
 		nrm = -nrm
-	for v in [a, b, c]:
+	var vs := [a, b, c]
+	var cs := [ca, cb, cc]
+	for k in 3:
+		var col: Color = cs[k]
 		st.set_normal(nrm)
 		st.set_color(col)
-		st.add_vertex(v)
+		st.add_vertex(vs[k])
 
-func _frustum(st: SurfaceTool, ox: float, oz: float, y0: float, y1: float, r0: float, r1: float, col: Color, sides: int) -> void:
+func _frustum(st: SurfaceTool, ox: float, oz: float, y0: float, y1: float, r0: float, r1: float, cb: Color, ct: Color, sides: int) -> void:
 	for i in sides:
 		var a0 := TAU * float(i) / float(sides)
 		var a1 := TAU * float(i + 1) / float(sides)
@@ -1283,66 +1395,130 @@ func _frustum(st: SurfaceTool, ox: float, oz: float, y0: float, y1: float, r0: f
 		var b1 := Vector3(ox + cos(a1) * r0, y0, oz + sin(a1) * r0)
 		var t0 := Vector3(ox + cos(a0) * r1, y1, oz + sin(a0) * r1)
 		var t1 := Vector3(ox + cos(a1) * r1, y1, oz + sin(a1) * r1)
-		_vtri(st, b0, t0, b1, col, outv)
+		_vtri(st, b0, t0, b1, cb, ct, cb, outv)
 		if r1 > 0.001:
-			_vtri(st, b1, t0, t1, col, outv)
-			_vtri(st, Vector3(ox, y1, oz), t0, t1, col, Vector3.UP)
+			_vtri(st, b1, t0, t1, cb, ct, ct, outv)
+			_vtri(st, Vector3(ox, y1, oz), t0, t1, ct, ct, ct, Vector3.UP)
+
+func _fr(st: SurfaceTool, ox: float, oz: float, y0: float, y1: float, r0: float, r1: float, col: Color, sides: int) -> void:
+	_frustum(st, ox, oz, y0, y1, r0, r1, col, col, sides)
+
+func _bt(st: SurfaceTool, c: Vector3, rad: Vector3, col: Color, sd: float, p0: Vector3, p1: Vector3, p2: Vector3) -> void:
+	for p in [p0, p1, p2]:
+		var dir: Vector3 = p
+		var j := 1.0 + 0.14 * sin(dir.x * 6.0 + sd) * cos(dir.y * 5.0 + sd * 1.7) + 0.08 * sin(dir.z * 9.0 + sd * 0.6)
+		var pos := c + Vector3(dir.x * rad.x, dir.y * rad.y, dir.z * rad.z) * j
+		var shade := 0.82 + 0.28 * (dir.y * 0.5 + 0.5)
+		st.set_normal(dir)
+		st.set_color(Color(col.r * shade, col.g * shade, col.b * shade))
+		st.add_vertex(pos)
+
+func _blob(st: SurfaceTool, c: Vector3, rad: Vector3, col: Color, sd: float, sub: bool) -> void:
+	var t := (1.0 + sqrt(5.0)) / 2.0
+	var vs: Array = [
+		Vector3(-1, t, 0), Vector3(1, t, 0), Vector3(-1, -t, 0), Vector3(1, -t, 0),
+		Vector3(0, -1, t), Vector3(0, 1, t), Vector3(0, -1, -t), Vector3(0, 1, -t),
+		Vector3(t, 0, -1), Vector3(t, 0, 1), Vector3(-t, 0, -1), Vector3(-t, 0, 1)]
+	var fs: Array = [
+		[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+		[1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+		[3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+		[4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]]
+	for f in fs:
+		var a: Vector3 = (vs[f[0]] as Vector3).normalized()
+		var b: Vector3 = (vs[f[1]] as Vector3).normalized()
+		var d: Vector3 = (vs[f[2]] as Vector3).normalized()
+		if sub:
+			var ab := ((a + b) * 0.5).normalized()
+			var bd := ((b + d) * 0.5).normalized()
+			var da := ((d + a) * 0.5).normalized()
+			_bt(st, c, rad, col, sd, a, ab, da)
+			_bt(st, c, rad, col, sd, ab, b, bd)
+			_bt(st, c, rad, col, sd, da, bd, d)
+			_bt(st, c, rad, col, sd, ab, bd, da)
+		else:
+			_bt(st, c, rad, col, sd, a, b, d)
 
 func _new_st() -> SurfaceTool:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	return st
 
-func _mesh_oak() -> ArrayMesh:
+func _mesh_oak(lush: bool) -> ArrayMesh:
 	var st := _new_st()
-	_frustum(st, 0, 0, 0.0, 2.4, 0.4, 0.28, Color(0.4, 0.27, 0.15), 6)
-	_frustum(st, 0, 0, 1.9, 3.9, 1.9, 1.35, Color(0.2, 0.5, 0.15), 7)
-	_frustum(st, 0, 0, 3.7, 5.6, 1.45, 0.0, Color(0.27, 0.6, 0.18), 7)
+	var g1 := Color(0.2, 0.52, 0.14) if lush else Color(0.12, 0.38, 0.14)
+	var g2 := Color(0.3, 0.62, 0.18) if lush else Color(0.18, 0.46, 0.16)
+	_frustum(st, 0, 0, 0.0, 2.6, 0.45, 0.3, Color(0.3, 0.2, 0.12), Color(0.42, 0.29, 0.17), 6)
+	_blob(st, Vector3(0, 3.6, 0), Vector3(2.0, 1.6, 2.0), g1, 1.0, false)
+	_blob(st, Vector3(0.9, 4.5, 0.3), Vector3(1.5, 1.3, 1.5), g2, 2.3, false)
+	_blob(st, Vector3(-0.8, 4.7, -0.4), Vector3(1.4, 1.3, 1.4), g2, 3.7, false)
+	_blob(st, Vector3(0.0, 5.4, 0.0), Vector3(1.2, 1.0, 1.2), g2, 5.1, false)
 	return st.commit()
 
 func _mesh_pine() -> ArrayMesh:
 	var st := _new_st()
-	_frustum(st, 0, 0, 0.0, 1.6, 0.35, 0.25, Color(0.35, 0.24, 0.14), 6)
-	_frustum(st, 0, 0, 1.2, 3.4, 1.9, 0.5, Color(0.1, 0.38, 0.22), 7)
-	_frustum(st, 0, 0, 2.8, 5.0, 1.5, 0.3, Color(0.12, 0.42, 0.25), 7)
-	_frustum(st, 0, 0, 4.4, 6.6, 1.1, 0.0, Color(0.9, 0.95, 1.0), 7)
+	_frustum(st, 0, 0, 0.0, 1.8, 0.4, 0.28, Color(0.28, 0.19, 0.11), Color(0.38, 0.26, 0.15), 6)
+	_frustum(st, 0, 0, 1.0, 3.2, 2.1, 0.7, Color(0.07, 0.3, 0.18), Color(0.12, 0.42, 0.24), 6)
+	_frustum(st, 0, 0, 2.5, 4.6, 1.7, 0.5, Color(0.08, 0.33, 0.19), Color(0.14, 0.46, 0.26), 6)
+	_frustum(st, 0, 0, 3.9, 6.0, 1.3, 0.35, Color(0.09, 0.36, 0.2), Color(0.16, 0.5, 0.28), 6)
+	_frustum(st, 0, 0, 5.3, 7.4, 0.95, 0.0, Color(0.12, 0.4, 0.24), Color(0.92, 0.96, 1.0), 6)
 	return st.commit()
 
 func _mesh_cactus() -> ArrayMesh:
 	var st := _new_st()
-	_frustum(st, 0, 0, 0.0, 3.2, 0.45, 0.38, Color(0.2, 0.55, 0.25), 6)
-	_frustum(st, 0.75, 0, 1.3, 2.5, 0.25, 0.22, Color(0.22, 0.58, 0.27), 6)
+	_frustum(st, 0, 0, 0.0, 3.2, 0.45, 0.38, Color(0.16, 0.48, 0.22), Color(0.26, 0.62, 0.3), 6)
+	_frustum(st, 0.75, 0, 1.3, 2.5, 0.25, 0.22, Color(0.2, 0.55, 0.25), Color(0.28, 0.64, 0.32), 6)
 	return st.commit()
 
 func _mesh_rock() -> ArrayMesh:
 	var st := _new_st()
-	_frustum(st, 0, 0, 0.0, 0.9, 1.1, 0.8, Color(0.5, 0.49, 0.47), 6)
-	_frustum(st, 0.1, 0, 0.8, 1.5, 0.8, 0.3, Color(0.42, 0.41, 0.4), 6)
+	_blob(st, Vector3(0, 0.55, 0), Vector3(1.1, 0.75, 1.0), Color(0.5, 0.49, 0.47), 0.7, true)
+	_blob(st, Vector3(0.7, 0.35, 0.3), Vector3(0.6, 0.45, 0.55), Color(0.44, 0.43, 0.42), 2.1, false)
 	return st.commit()
 
 func _mesh_bush() -> ArrayMesh:
 	var st := _new_st()
-	_frustum(st, 0, 0, 0.0, 0.8, 0.9, 0.55, Color(0.18, 0.45, 0.15), 7)
-	_frustum(st, 0.35, 0.1, 0.6, 1.0, 0.2, 0.1, Color(0.85, 0.1, 0.2), 5)
-	_frustum(st, -0.3, 0.25, 0.6, 1.0, 0.2, 0.1, Color(0.85, 0.1, 0.2), 5)
-	_frustum(st, 0.0, -0.4, 0.6, 1.0, 0.2, 0.1, Color(0.85, 0.1, 0.2), 5)
+	_blob(st, Vector3(0, 0.55, 0), Vector3(0.95, 0.65, 0.95), Color(0.16, 0.45, 0.14), 1.3, false)
+	_blob(st, Vector3(0.45, 0.55, 0.4), Vector3(0.7, 0.5, 0.7), Color(0.2, 0.5, 0.16), 2.4, false)
+	var berry := Color(0.9, 0.1, 0.2)
+	_blob(st, Vector3(0.35, 0.95, 0.1), Vector3(0.16, 0.16, 0.16), berry, 3.0, false)
+	_blob(st, Vector3(-0.3, 0.9, 0.35), Vector3(0.16, 0.16, 0.16), berry, 3.5, false)
+	_blob(st, Vector3(0.05, 1.0, -0.4), Vector3(0.16, 0.16, 0.16), berry, 4.0, false)
+	_blob(st, Vector3(0.7, 0.8, 0.5), Vector3(0.14, 0.14, 0.14), berry, 4.4, false)
 	return st.commit()
 
 func _mesh_tower() -> ArrayMesh:
 	var st := _new_st()
-	_frustum(st, 0, 0, 0.0, 9.0, 2.6, 2.2, Color(0.55, 0.54, 0.52), 8)
-	_frustum(st, 0, 0, 9.0, 11.0, 2.2, 1.0, Color(0.42, 0.41, 0.4), 8)
-	_frustum(st, 1.4, 0, 9.0, 12.5, 0.8, 0.8, Color(0.5, 0.49, 0.47), 6)
-	_frustum(st, 0, 0, 10.5, 11.0, 1.2, 0.9, Color(0.35, 0.5, 0.3), 8)
+	_fr(st, 0, 0, 0.0, 9.0, 2.6, 2.2, Color(0.55, 0.54, 0.52), 8)
+	_fr(st, 0, 0, 9.0, 11.0, 2.2, 1.0, Color(0.42, 0.41, 0.4), 8)
+	_fr(st, 1.4, 0, 9.0, 12.5, 0.8, 0.8, Color(0.5, 0.49, 0.47), 6)
+	_fr(st, 0, 0, 10.5, 11.0, 1.2, 0.9, Color(0.35, 0.5, 0.3), 8)
 	return st.commit()
 
 func _mesh_tent() -> ArrayMesh:
 	var st := _new_st()
-	_frustum(st, 0, 0, 0.0, 2.4, 2.2, 0.0, Color(0.8, 0.65, 0.4), 4)
+	_fr(st, 0, 0, 0.0, 2.4, 2.2, 0.0, Color(0.8, 0.65, 0.4), 4)
 	return st.commit()
 
 func _mesh_flame() -> ArrayMesh:
 	var st := _new_st()
-	_frustum(st, 0, 0, 0.0, 0.9, 0.4, 0.0, Color(1.0, 0.55, 0.1), 5)
-	_frustum(st, 0, 0, 0.0, 0.5, 0.25, 0.0, Color(1.0, 0.9, 0.3), 5)
+	_fr(st, 0, 0, 0.0, 0.9, 0.4, 0.0, Color(1.0, 0.55, 0.1), 5)
+	_fr(st, 0, 0, 0.0, 0.5, 0.25, 0.0, Color(1.0, 0.9, 0.3), 5)
+	return st.commit()
+
+func _mesh_grass(cb: Color, ct: Color) -> ArrayMesh:
+	var st := _new_st()
+	for k in 4:
+		var a := float(k) * 1.7
+		var hh := 0.55 + float(k % 3) * 0.2
+		_frustum(st, cos(a) * 0.18, sin(a) * 0.18, 0.0, hh, 0.07, 0.0, cb, ct, 3)
+	return st.commit()
+
+func _mesh_flower() -> ArrayMesh:
+	var st := _new_st()
+	var green := Color(0.2, 0.5, 0.18)
+	_frustum(st, 0, 0, 0.0, 0.5, 0.03, 0.03, green, green, 3)
+	_blob(st, Vector3(0, 0.55, 0), Vector3(0.14, 0.1, 0.14), Color(1.0, 0.85, 0.2), 1.0, false)
+	_frustum(st, 0.35, 0.2, 0.0, 0.4, 0.03, 0.03, green, green, 3)
+	_blob(st, Vector3(0.35, 0.45, 0.2), Vector3(0.13, 0.1, 0.13), Color(0.95, 0.5, 0.7), 2.0, false)
 	return st.commit()
