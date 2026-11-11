@@ -551,7 +551,8 @@ func _use(id: String) -> void:
 			_spend(id, 1)
 			_say("Đã đặt lửa trại")
 		_:
-			_say("Cứ để trong túi, tự dùng khi thu thập")
+						if not get_node("/root/Fauna").use_item(id):
+				 _say("Cứ để trong túi, tự dùng khi thu thập")
 	_refresh_bag()
 
 func _add(id: String, n: int) -> void:
