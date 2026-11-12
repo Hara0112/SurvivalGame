@@ -20,3 +20,5 @@ textures/vram_compression/import_etc2_astc=true
 
 Fauna="*res://fauna.gd"
 Gear="*res://gear.gd"
+Voice="*res://voice.gd"
+Sfx="*res://sfx.gd"
